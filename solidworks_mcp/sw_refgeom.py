@@ -133,7 +133,7 @@ def create_plane(args: dict[str, Any]) -> dict[str, Any]:
 def create_axis(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_part()
     exit_active_sketch(doc)
-    from sw_core import find_feature, iter_features
+    from .sw_core import find_feature, iter_features
 
     before = {f["name"] for f in iter_features(doc)}
     count = require_selection(doc, args["selection"])

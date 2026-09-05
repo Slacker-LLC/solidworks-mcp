@@ -28,6 +28,7 @@ from typing import Any
 from .sw_core import (
     active_document,
     apply_selection,
+    call_versioned,
     CHAMFER_ANGLE_DISTANCE,
     CHAMFER_DISTANCE_DISTANCE,
     CHAMFER_EQUAL_DISTANCE,
@@ -170,7 +171,7 @@ def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
 
     def attempt(reverse: bool) -> tuple[str, Any]:
         name = select_sketch_for_feature(doc, args.get("sketch_name"))
-        return name, feature_manager(doc).FeatureCut4(
+        cut_args = (
             single_direction, bool(args.get("flip_side", False)), reverse,
             condition_1, condition_2, depth, depth,
             has_draft, False, False, False,
@@ -179,6 +180,13 @@ def cut_extrude(args: dict[str, Any]) -> dict[str, Any]:
             False, True, True,
             False, False, False,
             0, 0.0, False, False,
+        )
+        # FeatureCut3 (2014-2016 builds) takes the same list without the
+        # trailing OptimizeGeometry flag.
+        return name, call_versioned(
+            feature_manager(doc),
+            ("FeatureCut4", cut_args),
+            ("FeatureCut3", cut_args[:26]),
         )
 
     sketch, feature = attempt(requested)
@@ -508,19 +516,31 @@ def sweep(args: dict[str, Any]) -> dict[str, Any]:
     twist = to_rad(args.get("twist_angle_deg", 0))
     if bool(args.get("cut", False)):
         # InsertCutSwept5 has no Merge flag but does carry assembly scope flags.
-        feature = manager.InsertCutSwept5(
+        # InsertCutSwept4 (2016) is the same list without the last three.
+        cut_args = (
             False, True, 0, keep_tangency, False,
             0, 0, False, 0.0, 0.0, 0, 0,
             True, True, twist, False,
             False, False, False,
             False, 0.0, 0,
         )
+        feature = call_versioned(
+            manager,
+            ("InsertCutSwept5", cut_args),
+            ("InsertCutSwept4", cut_args[:19]),
+        )
     else:
-        feature = manager.InsertProtrusionSwept4(
+        # InsertProtrusionSwept3 (2016) stops after BMergeSmoothFaces.
+        boss_args = (
             False, True, 0, keep_tangency, False,
             0, 0, False, 0.0, 0.0, 0, 0,
             bool(args.get("merge", True)), True, True,
             twist, False, False, 0.0, 0,
+        )
+        feature = call_versioned(
+            manager,
+            ("InsertProtrusionSwept4", boss_args),
+            ("InsertProtrusionSwept3", boss_args[:17]),
         )
     rename_feature(feature, args.get("name"))
     return feature_result(
@@ -609,7 +629,7 @@ def linear_pattern(args: dict[str, Any]) -> dict[str, Any]:
         require_selection(doc, args["direction2_selection"], mark=2, append=True)
     require_selection(doc, args["selection"], mark=4, append=True)
 
-    feature = feature_manager(doc).FeatureLinearPattern5(
+    pattern_args = (
         int(args.get("count1", 2)), to_m(args["spacing1_mm"]),
         int(args.get("count2", 1)) if has_second else 1,
         to_m(args.get("spacing2_mm", 0)) if has_second else 0.0,
@@ -618,6 +638,12 @@ def linear_pattern(args: dict[str, Any]) -> dict[str, Any]:
         bool(args.get("geometry_pattern", False)), False,
         False, False, True, True, False, False, False, False, 0.0, 0.0,
         False, False,
+    )
+    # FeatureLinearPattern4 (2016) ends at Offset2, i.e. the first 20 arguments.
+    feature = call_versioned(
+        feature_manager(doc),
+        ("FeatureLinearPattern5", pattern_args),
+        ("FeatureLinearPattern4", pattern_args[:20]),
     )
     rename_feature(feature, args.get("name"))
     return feature_result(doc, feature, "linear pattern", count1=int(args.get("count1", 2)))
@@ -649,12 +675,18 @@ def circular_pattern(args: dict[str, Any]) -> dict[str, Any]:
     # SOLIDWORKS always stores a per-instance step; for equal spacing it wants
     # the full spread, which it then divides internally.
     spacing = to_rad(args.get("angle_deg", 360))
-    feature = feature_manager(doc).FeatureCircularPattern5(
+    pattern_args = (
         int(args.get("count", 4)), spacing,
         bool(args.get("reverse", False)), "",
         bool(args.get("geometry_pattern", False)),
         bool(args.get("equal_spacing", True)), False, False,
         False, False, 1, 0.0, "", False,
+    )
+    # FeatureCircularPattern4 (2016) ends at VaryInstance, the first 7 arguments.
+    feature = call_versioned(
+        feature_manager(doc),
+        ("FeatureCircularPattern5", pattern_args),
+        ("FeatureCircularPattern4", pattern_args[:7]),
     )
     rename_feature(feature, args.get("name"))
     return feature_result(doc, feature, "circular pattern", count=int(args.get("count", 4)))

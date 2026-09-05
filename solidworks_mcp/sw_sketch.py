@@ -454,7 +454,7 @@ def draw_spline(args: dict[str, Any]) -> dict[str, Any]:
     flat: list[float] = []
     for point in args["points"]:
         flat.extend([to_m(point["x_mm"]), to_m(point["y_mm"]), 0.0])
-    from sw_core import double_array
+    from .sw_core import double_array
 
     before = _segment_count(doc)
     manager.CreateSpline(double_array(flat))
@@ -615,7 +615,7 @@ def sketch_mirror(args: dict[str, Any]) -> dict[str, Any]:
     index = int(args["mirror_segment"])
     if not 0 <= index < len(segments):
         return result(False, f"mirror_segment {index} is out of range (0..{len(segments) - 1}).")
-    from sw_core import select_object
+    from .sw_core import select_object
 
     if not select_object(doc, segments[index], mark=0, append=True):
         return result(False, "Could not add the mirror centerline to the selection.")

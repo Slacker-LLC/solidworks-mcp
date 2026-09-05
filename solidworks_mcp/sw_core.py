@@ -350,6 +350,11 @@ _FEATURE_MANAGER_METHODS = (
     "InsertFeatureChamfer", "InsertRib", "InsertMultiFaceDraft", "SimpleHole2",
     "InsertProtrusionSwept4", "InsertCutSwept5", "InsertProtrusionBlend2", "InsertCutBlend",
     "FeatureLinearPattern5", "FeatureCircularPattern5", "InsertMirrorFeature2", "InsertRefPlane",
+    # Older variants that call_versioned falls back to on builds without the
+    # newer names above (SOLIDWORKS 2016 has FeatureCut3 but no FeatureCut4).
+    # Newer builds keep the old names, so flagging them costs nothing there.
+    "FeatureCut3", "InsertProtrusionSwept3", "InsertCutSwept4",
+    "FeatureLinearPattern4", "FeatureCircularPattern4",
 )
 
 _EXTENSION_METHODS = (
@@ -390,6 +395,32 @@ def extension(doc: Any) -> Any:
 
 def selectable(obj: Any) -> Any:
     return flag_methods(obj, "Select2", "Select4")
+
+
+def call_versioned(obj: Any, *candidates: tuple[str, Sequence[Any]]) -> Any:
+    """Call the first member of ``obj`` that this SOLIDWORKS build exposes.
+
+    Each release adds numbered variants -- FeatureCut4 over FeatureCut3 -- whose
+    argument list extends the older one, while the older name keeps working.
+    List the newest first with its full arguments and the older ones with the
+    prefix they take; a build that lacks the newer name (SOLIDWORKS 2016 has
+    no FeatureCut4) silently gets the older call, and a build that has it never
+    pays for the fallback.  Names already known to be absent are skipped
+    without another cross-process lookup.
+    """
+    last: Exception | None = None
+    for name, args in candidates:
+        if name in _UNFLAGGABLE_NAMES:
+            continue
+        try:
+            method = getattr(obj, name)
+        except AttributeError as exc:
+            _UNFLAGGABLE_NAMES.add(name)
+            last = exc
+            continue
+        return method(*args)
+    names = ", ".join(name for name, _ in candidates)
+    raise RuntimeError(f"This SOLIDWORKS build exposes none of: {names}.") from last
 
 
 def safe(obj: Any, member: str, default: Any = None) -> Any:

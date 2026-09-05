@@ -144,6 +144,84 @@ class FlagMethodsTests(unittest.TestCase):
                 self.assertEqual(len(names), len(set(names)), f"{label} repeats a name")
 
 
+class FakeVersionedDispatch:
+    """A dispatch whose members resolve the way pywin32's dynamic lookup does.
+
+    Attribute access on a name the build does not expose raises AttributeError
+    from ``__getattr__``, exactly as ``CDispatch`` does when ``GetIDsOfNames``
+    fails; a known name returns a callable that records the call.
+    """
+
+    def __init__(self, known: set[str]) -> None:
+        self.known = set(known)
+        self.attempted: list[str] = []
+        self.calls: list[tuple[str, tuple]] = []
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        self.attempted.append(name)
+        if name not in self.known:
+            raise AttributeError(f"<unknown>.{name}")
+
+        def method(*args):
+            self.calls.append((name, args))
+            return f"{name} feature"
+
+        return method
+
+
+class CallVersionedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved = set(sw_core._UNFLAGGABLE_NAMES)
+        sw_core._UNFLAGGABLE_NAMES.clear()
+
+    def tearDown(self) -> None:
+        sw_core._UNFLAGGABLE_NAMES.clear()
+        sw_core._UNFLAGGABLE_NAMES.update(self._saved)
+
+    def test_the_newest_name_wins_when_the_build_has_it(self) -> None:
+        obj = FakeVersionedDispatch({"FeatureCut4", "FeatureCut3"})
+        outcome = sw_core.call_versioned(obj, ("FeatureCut4", (1, 2, 3)), ("FeatureCut3", (1, 2)))
+        self.assertEqual(outcome, "FeatureCut4 feature")
+        self.assertEqual(obj.calls, [("FeatureCut4", (1, 2, 3))])
+
+    def test_an_older_build_gets_the_older_name_with_its_own_arguments(self) -> None:
+        """The case this helper exists for: SOLIDWORKS 2016 has no FeatureCut4."""
+        obj = FakeVersionedDispatch({"FeatureCut3"})
+        outcome = sw_core.call_versioned(obj, ("FeatureCut4", (1, 2, 3)), ("FeatureCut3", (1, 2)))
+        self.assertEqual(outcome, "FeatureCut3 feature")
+        self.assertEqual(obj.calls, [("FeatureCut3", (1, 2))])
+        self.assertIn("FeatureCut4", sw_core._UNFLAGGABLE_NAMES)
+
+    def test_a_name_known_to_be_absent_is_not_looked_up_again(self) -> None:
+        """Each lookup is a cross-process GetIDsOfNames, so remember the misses."""
+        sw_core._UNFLAGGABLE_NAMES.add("FeatureCut4")
+        obj = FakeVersionedDispatch({"FeatureCut3"})
+        sw_core.call_versioned(obj, ("FeatureCut4", ()), ("FeatureCut3", ()))
+        self.assertEqual(obj.attempted, ["FeatureCut3"])
+
+    def test_no_candidate_at_all_is_a_clear_error_naming_every_candidate(self) -> None:
+        obj = FakeVersionedDispatch(set())
+        with self.assertRaises(RuntimeError) as raised:
+            sw_core.call_versioned(obj, ("FeatureCut4", ()), ("FeatureCut3", ()))
+        self.assertIn("FeatureCut4", str(raised.exception))
+        self.assertIn("FeatureCut3", str(raised.exception))
+
+    def test_every_fallback_name_is_flagged_as_a_method(self) -> None:
+        """An unflagged argument-taking member is what silently returns None or
+        takes SOLIDWORKS down, so the older variants must be in the flag lists
+        like the current ones."""
+        from solidworks_mcp import sw_drawing
+
+        fallbacks = {
+            "FeatureCut3", "InsertProtrusionSwept3", "InsertCutSwept4",
+            "FeatureLinearPattern4", "FeatureCircularPattern4",
+        }
+        self.assertLessEqual(fallbacks, set(sw_core._FEATURE_MANAGER_METHODS))
+        self.assertIn("CreateDetailViewAt3", sw_drawing._DRAWING_METHODS)
+
+
 class UnitTests(unittest.TestCase):
     def test_millimetres_and_metres_round_trip(self) -> None:
         self.assertEqual(sw_core.to_m(1000), 1.0)

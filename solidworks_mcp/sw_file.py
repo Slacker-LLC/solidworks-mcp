@@ -40,6 +40,7 @@ from .sw_core import (
     require_part,
     result,
     running_app,
+    safe,
     discover_template,
     tool,
     value,
@@ -302,7 +303,7 @@ def rebuild_document(args: dict[str, Any]) -> dict[str, Any]:
     ["red", "green", "blue"],
 )
 def set_appearance(args: dict[str, Any]) -> dict[str, Any]:
-    from sw_core import as_list, enumerate_faces, get_bodies, safe
+    from .sw_core import as_list, enumerate_faces, get_bodies, safe
 
     _, doc = require_part()
     values = (
@@ -328,6 +329,32 @@ def set_appearance(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, f"Applied the colour to {target}.", rgb=[args["red"], args["green"], args["blue"]])
 
 
+def _material_readback(doc: Any, database: str) -> str:
+    """Read the assigned material name back, across the API's several shapes.
+
+    GetMaterialPropertyName2 takes the database as an [in, out] string.  Given
+    a plain Python string, SOLIDWORKS 2016 returns nothing even though the
+    material was applied (the mass changes), so the typed by-reference form is
+    tried first.  MaterialIdName, stable since 2008, reports "database|name"
+    and is the last resort.
+    """
+    for database_arg in (
+        win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_BSTR, database),
+        database,
+    ):
+        try:
+            raw = doc.GetMaterialPropertyName2("", database_arg)
+        except Exception:
+            continue
+        if isinstance(raw, (list, tuple)):
+            raw = raw[0] if raw else ""
+        name = str(raw or "")
+        if name:
+            return name
+    ident = str(safe(doc, "MaterialIdName", "") or "")
+    return ident.split("|", 1)[1] if "|" in ident else ident
+
+
 @tool(
     "set_material",
     "Assign a SOLIDWORKS material to the active part, which is what makes get_mass_properties "
@@ -346,11 +373,7 @@ def set_material(args: dict[str, Any]) -> dict[str, Any]:
         doc.SetMaterialPropertyName2("", database, name)
     except Exception as exc:
         return result(False, f"SOLIDWORKS rejected that material: {exc}")
-    applied = ""
-    try:
-        applied = str(doc.GetMaterialPropertyName2("", database) or "")
-    except Exception:
-        pass
+    applied = _material_readback(doc, database)
     rebuild(doc)
     # An unknown material name is accepted silently and leaves the part
     # unassigned, so treat anything but an exact read-back as a failure.

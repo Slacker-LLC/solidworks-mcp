@@ -297,6 +297,12 @@ ring, swept rod and lofted cone match their closed-form volumes; a 5-degree
 under its profile; `through_all_both` removes the full cylinder rather than half
 of it. The limitations above are what survived that pass.
 
+Older releases work too, back to at least SOLIDWORKS 2016 SP3, where every tool
+was exercised the same way on a German install. Where a release lacks the newest
+numbered method (`FeatureCut4`, `FeatureLinearPattern5`, `CreateDetailViewAt4`,
+...) the tool falls back to the earlier variant with the arguments it takes; on
+newer releases the newest name is always tried first, so nothing changes there.
+
 ## Layout
 
 | Module | Contents |

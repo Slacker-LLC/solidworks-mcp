@@ -193,7 +193,7 @@ def add_mate(args: dict[str, Any]) -> dict[str, Any]:
     {},
 )
 def list_mates(args: dict[str, Any]) -> dict[str, Any]:
-    from sw_core import as_list, feature_property, iter_feature_objects
+    from .sw_core import as_list, feature_property, iter_feature_objects
 
     _, doc = require_assembly()
     reverse_types = {v: k for k, v in MATE_TYPES.items()}
