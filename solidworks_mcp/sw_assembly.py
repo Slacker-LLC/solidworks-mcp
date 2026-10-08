@@ -32,6 +32,7 @@ from .sw_core import (
     clear_selection,
     component_transform,
     document_info,
+    flag_methods,
     iter_components,
     logger,
     mm_point,
@@ -47,6 +48,7 @@ from .sw_core import (
     to_mm,
     tool,
     value,
+    whats_wrong,
 )
 
 
@@ -193,7 +195,7 @@ def add_mate(args: dict[str, Any]) -> dict[str, Any]:
     {},
 )
 def list_mates(args: dict[str, Any]) -> dict[str, Any]:
-    from sw_core import as_list, feature_property, iter_feature_objects
+    from .sw_core import as_list, feature_property, iter_feature_objects
 
     _, doc = require_assembly()
     reverse_types = {v: k for k, v in MATE_TYPES.items()}
@@ -240,3 +242,55 @@ def set_component_fixed(args: dict[str, Any]) -> dict[str, Any]:
     clear_selection(doc)
     rebuild(doc)
     return result(True, f"Set fixed={args.get('fixed', True)} on {len(names)} components.", components=names)
+
+
+def _named_component(doc: Any, name: str) -> Any:
+    for component in iter_components(doc):
+        if str(safe(component, "Name2", "")) == name:
+            return component
+    raise RuntimeError(f"No component named '{name}'. Use list_components first.")
+
+
+def _component_result(doc: Any, ok: bool, message: str, **data: Any) -> dict[str, Any]:
+    rebuild(doc)
+    problems = whats_wrong(doc)
+    return result(ok and not problems, message, problems=problems, **data)
+
+
+@tool("set_component_visibility", "Show or hide a named assembly component without suppressing it.",
+      {"name": {"type": "string"}, "visible": {"type": "boolean"}}, ["name", "visible"])
+def set_component_visibility(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_assembly()
+    component = _named_component(doc, str(args["name"]))
+    desired = 1 if args["visible"] else 0
+    component.Visible = desired
+    actual = int(value(component, "Visible"))
+    return _component_result(doc, actual == desired, "Updated component visibility.", name=args["name"], visible=actual == 1)
+
+
+@tool("set_component_suppression", "Suppress or fully resolve a named assembly component in the active configuration.",
+      {"name": {"type": "string"}, "suppressed": {"type": "boolean"}}, ["name", "suppressed"])
+def set_component_suppression(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_assembly()
+    component = flag_methods(_named_component(doc, str(args["name"])), "SetSuppression2")
+    code = int(component.SetSuppression2(0 if args["suppressed"] else 2))
+    actual = bool(value(component, "IsSuppressed"))
+    return _component_result(doc, actual == bool(args["suppressed"]), "Updated component suppression.", name=args["name"], suppressed=actual, status=code)
+
+
+@tool("set_component_configuration", "Switch a component to an existing configuration in its referenced part/subassembly, then rebuild.",
+      {"name": {"type": "string"}, "configuration": {"type": "string", "minLength": 1}}, ["name", "configuration"])
+def set_component_configuration(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_assembly()
+    component = _named_component(doc, str(args["name"]))
+    model = value(component, "GetModelDoc2")
+    if model is None:
+        return result(False, "Resolve the component before changing its configuration.")
+    name = str(args["configuration"])
+    names = [str(n) for n in value(model, "GetConfigurationNames") or []]
+    if name not in names:
+        return result(False, "Referenced configuration does not exist.", available_configurations=names)
+    component.ReferencedConfiguration = name
+    rebuild(doc)
+    actual = str(value(component, "ReferencedConfiguration"))
+    return _component_result(doc, actual == name, "Updated component configuration.", name=args["name"], configuration=actual)

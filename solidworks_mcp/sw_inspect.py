@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .sw_core import (
+    BODY_SHEET,
     active_document,
     apply_selection,
     apply_transform,
@@ -87,6 +88,7 @@ def _strip_internal(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     "Read-only: list the faces of the active part with surface type, area, a point on the face, and "
     "the index that selection.faces takes. Re-list after any geometry change, because indices move.",
     {
+        "body_type": {"type": "string", "enum": ["solid", "surface"], "default": "solid", "description": "Surface results use selection.surface_faces; solid results use selection.faces."},
         "surface_type": {
             "type": "string",
             "enum": ["plane", "cylinder", "cone", "sphere", "torus", "bsurface"],
@@ -104,7 +106,10 @@ def _strip_internal(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 )
 def list_faces(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
-    faces = enumerate_faces(doc)
+    kind = args.get("body_type", "solid")
+    if kind not in {"solid", "surface"}:
+        raise RuntimeError("body_type must be solid or surface.")
+    faces = enumerate_faces(doc, BODY_SHEET) if kind == "surface" else enumerate_faces(doc)
     total = len(faces)
 
     wanted_type = args.get("surface_type")
@@ -129,6 +134,7 @@ def list_faces(args: dict[str, Any]) -> dict[str, Any]:
         f"Read {len(faces)} of {total} faces.",
         faces=_strip_internal(faces),
         total_faces=total,
+        body_type=kind,
     )
 
 
@@ -137,6 +143,7 @@ def list_faces(args: dict[str, Any]) -> dict[str, Any]:
     "Read-only: list the edges of the active part with curve type, length, and the index that "
     "selection.edges takes. Re-list after any geometry change.",
     {
+        "body_type": {"type": "string", "enum": ["solid", "surface"], "default": "solid", "description": "Surface results use selection.surface_edges; solid results use selection.edges."},
         "curve_type": {
             "type": "string",
             "enum": ["line", "circle", "ellipse", "bcurve"],
@@ -148,7 +155,10 @@ def list_faces(args: dict[str, Any]) -> dict[str, Any]:
 )
 def list_edges(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
-    edges = enumerate_edges(doc)
+    kind = args.get("body_type", "solid")
+    if kind not in {"solid", "surface"}:
+        raise RuntimeError("body_type must be solid or surface.")
+    edges = enumerate_edges(doc, BODY_SHEET) if kind == "surface" else enumerate_edges(doc)
     total = len(edges)
 
     wanted = args.get("curve_type")
@@ -159,7 +169,7 @@ def list_edges(args: dict[str, Any]) -> dict[str, Any]:
     if args.get("max_length_mm") is not None:
         edges = [e for e in edges if e.get("length_mm", 1e18) <= float(args["max_length_mm"])]
 
-    return result(True, f"Read {len(edges)} of {total} edges.", edges=_strip_internal(edges), total_edges=total)
+    return result(True, f"Read {len(edges)} of {total} edges.", edges=_strip_internal(edges), total_edges=total, body_type=kind)
 
 
 @tool(

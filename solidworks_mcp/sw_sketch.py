@@ -22,9 +22,16 @@ afterthought.
 from __future__ import annotations
 
 from typing import Any
+import math
 
 from .sw_core import (
     active_document,
+    apply_transform,
+    document_type,
+    exit_active_sketch,
+    sketch_features,
+    sketch_name_for_object,
+    persistent_reference_id,
     sketch_point_objects,
     dispatch_array,
     empty_variant,
@@ -51,6 +58,7 @@ from .sw_core import (
     select_by_id,
     sketch_manager,
     sketch_names,
+    toggle_sketch,
     sketch_segment_objects,
     tool,
     to_deg,
@@ -138,6 +146,8 @@ def _require_open_sketch() -> tuple[Any, Any]:
 )
 def create_sketch(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = require_part()
+    if doc.SketchManager.ActiveSketch is not None:
+        return result(False, "A sketch is already open. Close it before creating another sketch.")
     face_index = args.get("face_index")
     if face_index is not None:
         require_selection(doc, {"faces": [int(face_index)]})
@@ -166,6 +176,31 @@ def create_sketch(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, f"Opened a sketch on {target}.", sketch=created, target=target)
 
 
+@tool("create_3d_sketch", "Create and open a new native 3D sketch in the active part or assembly. No plane is needed; geometry coordinates are model-space millimetres. Refuses to toggle an already-open sketch. Verifies native Is3D and the new feature before reporting success.",
+      {"name": {"type": "string", "minLength": 1}})
+def create_3d_sketch(args):
+    _, doc = active_document()
+    if document_type(doc) not in (1, 2):
+        raise RuntimeError("3D sketches require a part or assembly document.")
+    if doc.SketchManager.ActiveSketch is not None:
+        return result(False, "A sketch is already open. Close it before creating another sketch.")
+    before = set(sketch_names(doc))
+    clear_selection(doc)
+    toggle_sketch(doc, True)
+    active = doc.SketchManager.ActiveSketch
+    if active is None or not bool(value(active, "Is3D")):
+        return result(False, "SOLIDWORKS did not open a native 3D sketch.")
+    name, feature = latest_sketch(doc)
+    if name in before or safe(feature, "GetTypeName2") != "3DProfileFeature":
+        return result(False, "Could not confirm a new native 3D sketch feature.", sketch=name)
+    if args.get("name"):
+        feature.Name = args["name"]
+        if str(value(feature, "Name")) != args["name"]:
+            return result(False, "3D sketch created, but its requested name was not retained.", sketch=str(value(feature, "Name")))
+        name = args["name"]
+    return result(True, "Opened a native 3D sketch.", sketch=name, is_3d=True)
+
+
 @tool(
     "edit_sketch",
     "Reopen an existing sketch for editing by name.",
@@ -173,13 +208,23 @@ def create_sketch(args: dict[str, Any]) -> dict[str, Any]:
     ["sketch_name"],
 )
 def edit_sketch(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_part()
-    name, _ = resolve_sketch(doc, str(args["sketch_name"]))
+    _, doc = active_document()
+    if document_type(doc) not in (1, 2):
+        raise RuntimeError("Named sketch editing currently requires a part or assembly.")
+    if doc.SketchManager.ActiveSketch is not None:
+        return result(False, "A sketch is already open. Close it before editing another sketch.")
+    name, feature = resolve_sketch(doc, str(args["sketch_name"]))
+    specific = value(feature, "GetSpecificFeature2")
+    is_3d = bool(value(specific, "Is3D"))
+    expected = persistent_reference_id(doc, specific)
     clear_selection(doc)
     if not select_by_id(doc, name, "SKETCH"):
         return result(False, f"Could not select sketch '{name}'.")
-    sketch_manager(doc).InsertSketch(True)
-    return result(True, f"Reopened sketch '{name}' for editing.", sketch=name)
+    toggle_sketch(doc, is_3d)
+    active = doc.SketchManager.ActiveSketch
+    confirmed = active is not None and bool(value(active, "Is3D")) == is_3d and bool(expected) and persistent_reference_id(doc, active) == expected
+    return result(confirmed, f"Reopened sketch '{name}' for editing." if confirmed else "Could not confirm the requested sketch edit context.",
+                  sketch=name, is_3d=is_3d, reference_confirmed=confirmed)
 
 
 @tool("close_sketch", "Exit the open sketch without creating a feature.", {})
@@ -189,18 +234,42 @@ def close_sketch(args: dict[str, Any]) -> dict[str, Any]:
         return result(False, "No sketch is open.")
     name = ""
     try:
-        name, _ = latest_sketch(doc)
+        name = sketch_name_for_object(doc, doc.SketchManager.ActiveSketch)
     except Exception:
         pass
-    sketch_manager(doc).InsertSketch(True)
-    return result(True, "Closed the open sketch.", sketch=name)
+    is_3d = bool(value(doc.SketchManager.ActiveSketch, "Is3D"))
+    exit_active_sketch(doc)
+    return result(True, "Closed the open sketch.", sketch=name, is_3d=is_3d)
 
 
 @tool("list_sketches", "Read-only: list every sketch feature in the active document.", {})
 def list_sketches(args: dict[str, Any]) -> dict[str, Any]:
     _, doc = active_document()
     open_sketch = doc.SketchManager.ActiveSketch is not None
-    return result(True, "Read sketches.", sketches=sketch_names(doc), sketch_open=open_sketch)
+    details = [{"name": str(value(f, "Name")), "is_3d": bool(value(value(f, "GetSpecificFeature2"), "Is3D"))} for f in sketch_features(doc)]
+    return result(True, "Read sketches.", sketches=sketch_names(doc), sketch_details=details, sketch_open=open_sketch)
+
+
+@tool("list_sketch_points", "Read all native points of the open or named 2D/3D sketch with selection indices, native point types and sketch/model-space coordinates in mm. Includes generated endpoints/centers, so point indices match selection specs; user points have native type 1. Drawing-sketch enumeration remains pending.",
+      {"sketch_name": {"type": "string"}})
+def list_sketch_points(args):
+    _, doc = active_document()
+    if document_type(doc) not in (1, 2):
+        raise RuntimeError("Point enumeration currently requires a part or assembly.")
+    active = doc.SketchManager.ActiveSketch
+    if args.get("sketch_name") or active is None:
+        name, feature = resolve_sketch(doc, args.get("sketch_name"))
+        sketch = value(feature, "GetSpecificFeature2")
+    else:
+        name = sketch_name_for_object(doc, active)
+        sketch = active
+    matrix = value(value(value(sketch, "ModelToSketchTransform"), "Inverse"), "ArrayData")
+    points = []
+    for index, point in enumerate(as_list(value(sketch, "GetSketchPoints2"))):
+        coords = [float(value(point, k)) for k in ("X", "Y", "Z")]
+        points.append({"index": index, "native_type": int(value(point, "Type")), "point_mm": [c * 1000 for c in coords],
+                       "model_point_mm": [c * 1000 for c in apply_transform(coords, matrix)]})
+    return result(True, "Read native sketch points.", sketch=name, is_3d=bool(value(sketch, "Is3D")), points=points)
 
 
 @tool(
@@ -222,45 +291,75 @@ def list_sketch_segments(args: dict[str, Any]) -> dict[str, Any]:
 _XY = {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}
 
 
+def _xyz(args, x="x_mm", y="y_mm", z="z_mm"):
+    coords = [float(args[x]), float(args[y]), float(args.get(z, 0))]
+    if not all(math.isfinite(c) for c in coords):
+        raise RuntimeError("Sketch coordinates must be finite.")
+    return [c / 1000 for c in coords]
+
+
+def _check_z(doc, points):
+    if any(p[2] != 0 for p in points) and not bool(value(_active_sketch(doc), "Is3D")):
+        raise RuntimeError("Nonzero Z requires an open 3D sketch; 2D sketch coordinates lie in its XY plane.")
+
+
+def _create_without_inference(manager, method, *coords):
+    previous = manager.AddToDB
+    try:
+        manager.AddToDB = True
+        return getattr(manager, method)(*coords)
+    finally:
+        manager.AddToDB = previous
+
+
 @tool(
     "draw_line",
-    "Add a line to the open sketch. Coordinates are millimetres in sketch space.",
+    "Add a line to the open 2D/3D sketch. Coordinates are mm in sketch space (model space for 3D). Nonzero z1_mm/z2_mm requires a 3D sketch.",
     {
         "x1_mm": {"type": "number"}, "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number"}, "y2_mm": {"type": "number"},
+        "z1_mm": {"type": "number", "default": 0}, "z2_mm": {"type": "number", "default": 0},
         "construction": {"type": "boolean", "default": False},
     },
     ["x1_mm", "y1_mm", "x2_mm", "y2_mm"],
 )
 def draw_line(args: dict[str, Any]) -> dict[str, Any]:
+    a, b = _xyz(args, "x1_mm", "y1_mm", "z1_mm"), _xyz(args, "x2_mm", "y2_mm", "z2_mm")
     doc, manager = _require_open_sketch()
+    _check_z(doc, [a, b])
     before = _segment_count(doc)
-    segment = manager.CreateLine(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-    )
+    segment = _create_without_inference(manager, "CreateLine", *a, *b)
     if segment is not None and bool(args.get("construction", False)):
         segment.ConstructionGeometry = True
-    return _drawn(doc, before, "a line")
+    payload = _drawn(doc, before, "a line")
+    if payload["ok"]:
+        if segment is None:
+            return result(False, "Line geometry appeared, but its native reference could not be confirmed.")
+        endpoints = [[float(value(value(segment, method), k)) for k in ("X", "Y", "Z")]
+                     for method in ("GetStartPoint2", "GetEndPoint2")]
+        confirmed = min(max(math.dist(endpoints[0], a), math.dist(endpoints[1], b)),
+                        max(math.dist(endpoints[0], b), math.dist(endpoints[1], a))) <= 1e-5
+        if args.get("construction", False):
+            confirmed = confirmed and bool(value(segment, "ConstructionGeometry"))
+        payload.update(ok=confirmed)
+        payload["data"].update(start_mm=[c * 1000 for c in endpoints[0]], end_mm=[c * 1000 for c in endpoints[1]])
+        if not confirmed:
+            payload["message"] = "Line created, but requested endpoints or construction state could not be confirmed."
+    return payload
 
 
 @tool(
     "draw_centerline",
-    "Add a construction centerline to the open sketch, for revolve axes and symmetry. Millimetres.",
+    "Add a verified construction line to the open 2D/3D sketch. XYZ coordinates are millimetres; nonzero Z requires 3D. Uses native CreateLine because CreateCenterLine may flatten Z.",
     {
         "x1_mm": {"type": "number"}, "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number"}, "y2_mm": {"type": "number"},
+        "z1_mm": {"type": "number", "default": 0}, "z2_mm": {"type": "number", "default": 0},
     },
     ["x1_mm", "y1_mm", "x2_mm", "y2_mm"],
 )
 def draw_centerline(args: dict[str, Any]) -> dict[str, Any]:
-    doc, manager = _require_open_sketch()
-    before = _segment_count(doc)
-    manager.CreateCenterLine(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-    )
-    return _drawn(doc, before, "a centerline")
+    return draw_line({**args, "construction": True})
 
 
 @tool(
@@ -276,12 +375,23 @@ def draw_centerline(args: dict[str, Any]) -> dict[str, Any]:
 def draw_circle(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
     before = _segment_count(doc)
-    segment = manager.CreateCircleByRadius(
-        to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0, to_m(args["radius_mm"]),
-    )
+    segment = _create_without_inference(manager, "CreateCircleByRadius",
+        to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0, to_m(args["radius_mm"]))
     if segment is not None and bool(args.get("construction", False)):
         segment.ConstructionGeometry = True
-    return _drawn(doc, before, "a circle")
+    payload = _drawn(doc, before, "a circle")
+    if payload["ok"]:
+        if segment is None:
+            return result(False, "Circle geometry appeared, but its native reference could not be confirmed.")
+        center = value(segment, "GetCenterPoint2")
+        coords = [float(value(center, k)) * 1000 for k in ("X", "Y", "Z")]
+        radius = float(value(segment, "GetRadius")) * 1000
+        confirmed = math.dist(coords, [float(args["x_mm"]), float(args["y_mm"]), 0]) <= .01 and math.isclose(radius, float(args["radius_mm"]), abs_tol=.01, rel_tol=0)
+        payload.update(ok=confirmed)
+        payload["data"].update(center_mm=coords, radius_mm=radius)
+        if not confirmed:
+            payload["message"] = "Circle created, but requested center or radius could not be confirmed."
+    return payload
 
 
 @tool(
@@ -329,28 +439,60 @@ def draw_arc(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "draw_3point_arc",
-    "Add an arc through three points: start, end, and a point on the arc. Millimetres.",
+    "Add a verified 2D/3D arc through start, end and a point on the arc, in mm. Nonzero Z requires 3D. Rejects coincident or collinear input before creation and checks native endpoints, radius, length and curve distance.",
     {
         "x1_mm": {"type": "number"}, "y1_mm": {"type": "number"},
         "x2_mm": {"type": "number"}, "y2_mm": {"type": "number"},
         "x3_mm": {"type": "number"}, "y3_mm": {"type": "number"},
+        "z1_mm": {"type": "number", "default": 0}, "z2_mm": {"type": "number", "default": 0}, "z3_mm": {"type": "number", "default": 0},
     },
     ["x1_mm", "y1_mm", "x2_mm", "y2_mm", "x3_mm", "y3_mm"],
 )
 def draw_3point_arc(args: dict[str, Any]) -> dict[str, Any]:
+    points = [_xyz(args, f"x{i}_mm", f"y{i}_mm", f"z{i}_mm") for i in (1, 2, 3)]
+    a, b, c = points
+    u, v = [[q - p for p, q in zip(a, point)] for point in (b, c)]
+    def cross(x, y):
+        return [x[1]*y[2]-x[2]*y[1], x[2]*y[0]-x[0]*y[2], x[0]*y[1]-x[1]*y[0]]
+    def dot(x, y):
+        return sum(p*q for p, q in zip(x, y))
+    w = cross(u, v)
+    area_squared = dot(w, w)
+    if min(math.dist(a, b), math.dist(a, c), math.dist(b, c)) <= 1e-9 or area_squared <= dot(u,u)*dot(v,v)*1e-16:
+        raise RuntimeError("Three-point arcs require distinct, non-collinear points.")
+    center = [a[i] + (dot(u,u)*cross(v,w)[i] + dot(v,v)*cross(w,u)[i])/(2*area_squared) for i in range(3)]
+    radial = [[p[i]-center[i] for i in range(3)] for p in points]
+    radius = math.sqrt(dot(radial[0], radial[0]))
+    normal = [x/math.sqrt(area_squared) for x in w]
+    def angle(target):
+        return math.atan2(dot(normal, cross(radial[0], target)), dot(radial[0], target)) % (2*math.pi)
+    end_angle, through_angle = angle(radial[1]), angle(radial[2])
+    expected_length = radius*(end_angle if through_angle <= end_angle else 2*math.pi-end_angle)
     doc, manager = _require_open_sketch()
+    _check_z(doc, points)
     before = _segment_count(doc)
-    manager.Create3PointArc(
-        to_m(args["x1_mm"]), to_m(args["y1_mm"]), 0.0,
-        to_m(args["x2_mm"]), to_m(args["y2_mm"]), 0.0,
-        to_m(args["x3_mm"]), to_m(args["y3_mm"]), 0.0,
-    )
-    return _drawn(doc, before, "a 3-point arc")
+    segment = _create_without_inference(manager, "Create3PointArc", *(q for p in points for q in p))
+    payload = _drawn(doc, before, "a 3-point arc")
+    if not payload["ok"]:
+        return payload
+    if segment is None:
+        return result(False, "Arc appeared, but its native reference could not be confirmed.")
+    curve = value(segment, "GetCurve")
+    if curve is None:
+        return result(False, "Arc appeared, but its native curve could not be confirmed.")
+    flag_methods(curve, "GetClosestPointOn")
+    gaps = [math.dist(p, [float(q) for q in as_list(curve.GetClosestPointOn(*p))[:3]]) for p in points]
+    endpoints = [[float(value(value(segment, method), k)) for k in ("X", "Y", "Z")] for method in ("GetStartPoint2", "GetEndPoint2")]
+    endpoint_gap = min(max(math.dist(endpoints[0],a), math.dist(endpoints[1],b)), max(math.dist(endpoints[0],b), math.dist(endpoints[1],a)))
+    actual_radius, actual_length = float(value(segment,"GetRadius")), float(value(segment,"GetLength"))
+    confirmed = max(gaps+[endpoint_gap]) <= 1e-5 and abs(actual_radius-radius) <= 1e-5 and abs(actual_length-expected_length) <= 1e-5
+    return result(confirmed, "Created and verified a 3-point arc." if confirmed else "Arc created, but requested geometry could not be confirmed.",
+                  radius_mm=actual_radius*1000, length_mm=actual_length*1000, max_point_gap_mm=max(gaps+[endpoint_gap])*1000)
 
 
 @tool(
     "draw_ellipse",
-    "Add an ellipse from its centre, a major-axis point, and a minor-axis point. Millimetres.",
+    "Add a verified full ellipse in an open 2D sketch. Center and perpendicular major/minor axis points are mm. Verifies 24 theoretical points and perimeter; direct native 3D creation is unsupported, so use a plane sketch and convert_entities for spatial geometry (native spline representation).",
     {
         "center_x_mm": {"type": "number"}, "center_y_mm": {"type": "number"},
         "major_x_mm": {"type": "number"}, "major_y_mm": {"type": "number"},
@@ -359,14 +501,38 @@ def draw_3point_arc(args: dict[str, Any]) -> dict[str, Any]:
     ["center_x_mm", "center_y_mm", "major_x_mm", "major_y_mm", "minor_x_mm", "minor_y_mm"],
 )
 def draw_ellipse(args: dict[str, Any]) -> dict[str, Any]:
+    points = [_xyz(args, f"{p}_x_mm", f"{p}_y_mm") for p in ("center", "major", "minor")]
+    center, major, minor = points
+    u, v = [[q-p for p,q in zip(center,point)] for point in (major,minor)]
+    a, b = math.dist(center, major), math.dist(center, minor)
+    if min(a,b) <= 1e-9 or a < b or abs(sum(x*y for x,y in zip(u,v))) > a*b*1e-8:
+        raise RuntimeError("Ellipse axes must be nonzero, perpendicular, with major radius at least the minor radius.")
     doc, manager = _require_open_sketch()
+    if bool(value(_active_sketch(doc), "Is3D")):
+        raise RuntimeError("Native CreateEllipse requires a 2D sketch. Create it on a plane and convert the segment into a 3D sketch instead.")
     before = _segment_count(doc)
-    manager.CreateEllipse(
-        to_m(args["center_x_mm"]), to_m(args["center_y_mm"]), 0.0,
-        to_m(args["major_x_mm"]), to_m(args["major_y_mm"]), 0.0,
-        to_m(args["minor_x_mm"]), to_m(args["minor_y_mm"]), 0.0,
-    )
-    return _drawn(doc, before, "an ellipse")
+    segment = _create_without_inference(manager,"CreateEllipse",*(q for p in points for q in p))
+    payload = _drawn(doc, before, "an ellipse")
+    if not payload["ok"]:
+        return payload
+    curve = value(segment,"GetCurve") if segment is not None else None
+    if curve is None:
+        return result(False,"Ellipse appeared, but its native curve could not be confirmed.")
+    flag_methods(curve,"GetClosestPointOn")
+    gaps=[]
+    for i in range(24):
+        angle=2*math.pi*i/24
+        p=[center[k]+u[k]*math.cos(angle)+v[k]*math.sin(angle) for k in range(3)]
+        gaps.append(math.dist(p,[float(q) for q in as_list(curve.GetClosestPointOn(*p))[:3]]))
+    # Simpson integration of the independent theoretical perimeter.
+    n=256
+    h=2*math.pi/n
+    speeds=[math.sqrt(a*a*math.sin(i*h)**2+b*b*math.cos(i*h)**2) for i in range(n+1)]
+    expected=h/3*(speeds[0]+speeds[-1]+4*sum(speeds[1:-1:2])+2*sum(speeds[2:-1:2]))
+    length=float(value(segment,"GetLength"))
+    confirmed=max(gaps)<=1e-5 and abs(length-expected)<=1e-5
+    return result(confirmed,"Created and verified an ellipse." if confirmed else "Ellipse created, but requested geometry could not be confirmed.",
+                  length_mm=length*1000,max_point_gap_mm=max(gaps)*1000)
 
 
 @tool(
@@ -423,14 +589,19 @@ def draw_slot(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "draw_point",
-    "Add a sketch point, useful as a pierce/coincident reference. Millimetres.",
-    dict(_XY),
+    "Add a point to the open 2D/3D sketch. Coordinates are mm in sketch space (model space for 3D). Nonzero z_mm requires a 3D sketch; reports actual coordinates.",
+    {**_XY, "z_mm": {"type": "number", "default": 0}},
     ["x_mm", "y_mm"],
 )
 def draw_point(args: dict[str, Any]) -> dict[str, Any]:
+    coords = _xyz(args)
     doc, manager = _require_open_sketch()
-    point = manager.CreatePoint(to_m(args["x_mm"]), to_m(args["y_mm"]), 0.0)
-    return result(bool(point), "Added a sketch point." if point else "SOLIDWORKS did not create the point.")
+    _check_z(doc, [coords])
+    point = manager.CreatePoint(*coords)
+    actual = [float(value(point, k)) for k in ("X", "Y", "Z")] if point is not None else None
+    confirmed = actual is not None and math.dist(actual, coords) <= 1e-5
+    return result(confirmed, "Added a sketch point." if confirmed else "Sketch point creation or coordinates could not be confirmed.",
+                  point_mm=[c * 1000 for c in actual] if actual is not None else None)
 
 
 @tool(
@@ -442,7 +613,7 @@ def draw_point(args: dict[str, Any]) -> dict[str, Any]:
             "minItems": 2,
             "items": {
                 "type": "object",
-                "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}},
+                "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}, "z_mm": {"type": "number", "default": 0}},
                 "required": ["x_mm", "y_mm"],
             },
         }
@@ -450,11 +621,13 @@ def draw_point(args: dict[str, Any]) -> dict[str, Any]:
     ["points"],
 )
 def draw_spline(args: dict[str, Any]) -> dict[str, Any]:
+    points = [_xyz(p) for p in args["points"]]
     doc, manager = _require_open_sketch()
+    _check_z(doc, points)
     flat: list[float] = []
-    for point in args["points"]:
-        flat.extend([to_m(point["x_mm"]), to_m(point["y_mm"]), 0.0])
-    from sw_core import double_array
+    for point in points:
+        flat.extend(point)
+    from .sw_core import double_array
 
     before = _segment_count(doc)
     manager.CreateSpline(double_array(flat))
@@ -615,7 +788,7 @@ def sketch_mirror(args: dict[str, Any]) -> dict[str, Any]:
     index = int(args["mirror_segment"])
     if not 0 <= index < len(segments):
         return result(False, f"mirror_segment {index} is out of range (0..{len(segments) - 1}).")
-    from sw_core import select_object
+    from .sw_core import select_object
 
     if not select_object(doc, segments[index], mark=0, append=True):
         return result(False, "Could not add the mirror centerline to the selection.")
@@ -624,21 +797,67 @@ def sketch_mirror(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, "Mirrored the sketch entities.")
 
 
-@tool(
-    "convert_entities",
-    "Project the selected model edges or a face's loops onto the open sketch (Convert Entities).",
-    {
-        "selection": SELECTION_SCHEMA,
-        "chain": {"type": "boolean", "default": True},
-        "inner_loops": {"type": "boolean", "default": False},
-    },
-    ["selection"],
-)
+def _curve_samples(curve):
+    import pythoncom
+    import win32com.client
+    flag_methods(curve,"GetEndParams","Evaluate2")
+    refs=[win32com.client.VARIANT(pythoncom.VT_BYREF|t,v) for t,v in
+          ((pythoncom.VT_R8,0.),(pythoncom.VT_R8,0.),(pythoncom.VT_BOOL,False),(pythoncom.VT_BOOL,False))]
+    if not curve.GetEndParams(*refs):
+        raise RuntimeError("Cannot read native curve parameter bounds.")
+    start,end=float(refs[0].value),float(refs[1].value)
+    if not all(math.isfinite(x) for x in (start,end)) or end<=start:
+        raise RuntimeError("Native curve bounds are invalid.")
+    return [[float(q) for q in as_list(curve.Evaluate2(start+(end-start)*i/24,0))[:3]] for i in range(25)]
+
+
+@tool("convert_entities", "Convert selected edges, face loops or source sketch segments into the open 2D/3D sketch. Verifies new native curves; supported sketch-segment inputs additionally compare 25 transformed source samples and total length with chain=false. Reports ellipse-to-spline native representation and unverified correspondence explicitly.",
+      {"selection": SELECTION_SCHEMA,"chain": {"type":"boolean","default":True},"inner_loops":{"type":"boolean","default":False}},["selection"])
 def convert_entities(args: dict[str, Any]) -> dict[str, Any]:
     doc, manager = _require_open_sketch()
+    existing=sketch_segment_objects(doc)
+    before={persistent_reference_id(doc,s) for s in existing}
+    if b"" in before:
+        raise RuntimeError("Cannot identify existing target curves before conversion.")
+    spec=args["selection"]
+    expected=[]
+    expected_length=0.
+    supported=False
+    if spec.get("sketch_segments") and set(spec)<= {"sketch_name","sketch_segments"}:
+        source_segments=sketch_segment_objects(doc,spec.get("sketch_name"))
+        source_sketch = value(resolve_sketch(doc,spec["sketch_name"])[1],"GetSpecificFeature2") if spec.get("sketch_name") else manager.ActiveSketch
+        source_to_model=value(value(value(source_sketch,"ModelToSketchTransform"),"Inverse"),"ArrayData")
+        model_to_target=value(value(manager.ActiveSketch,"ModelToSketchTransform"),"ArrayData")
+        supported=True
+        for index in dict.fromkeys(spec["sketch_segments"]):
+            if not 0<=int(index)<len(source_segments):
+                raise RuntimeError("Source sketch segment index is out of range.")
+            segment=source_segments[int(index)]
+            length=float(value(segment,"GetLength"))
+            curve=value(segment,"GetCurve")
+            kind=int(value(segment,"GetType"))
+            if curve is None or kind not in (0,1,2,3) or (kind==1 and not math.isclose(length,2*math.pi*float(value(segment,"GetRadius")),abs_tol=1e-8)):
+                supported=False
+                break
+            expected.extend(apply_transform(apply_transform(p,source_to_model),model_to_target) for p in _curve_samples(curve))
+            expected_length+=length
     require_selection(doc, args["selection"])
     ok = bool(manager.SketchUseEdge3(bool(args.get("chain", True)), bool(args.get("inner_loops", False))))
-    return result(ok, "Converted the selected entities into the sketch." if ok else "SOLIDWORKS did not convert the selection.")
+    segments=[s for s in sketch_segment_objects(doc) if not before or persistent_reference_id(doc,s) not in before]
+    valid=all(value(s,"GetCurve") is not None and float(value(s,"GetLength")) > 0 for s in segments)
+    confirmed=ok and bool(segments) and valid
+    correspondence=None
+    gap_mm=None
+    if confirmed and supported and expected:
+        curves=[flag_methods(value(s,"GetCurve"),"GetClosestPointOn") for s in segments]
+        gap_mm=1000*max(min(math.dist(p,[float(q) for q in as_list(c.GetClosestPointOn(*p))[:3]]) for c in curves) for p in expected)
+        actual_length=sum(float(value(s,"GetLength")) for s in segments)
+        length_matches=actual_length>=expected_length-1e-5 if args.get("chain",True) else abs(actual_length-expected_length)<=1e-5
+        correspondence=gap_mm<=.01 and length_matches
+        confirmed=confirmed and correspondence
+    return result(confirmed, "Converted and verified native output curves." if confirmed else "Conversion or native output curves could not be confirmed.",
+                  native_accepted=ok,segments_added=len(segments),native_types=[int(value(s,"GetType")) for s in segments],
+                  geometry_correspondence_confirmed=correspondence,max_source_point_gap_mm=gap_mm)
 
 
 @tool(
@@ -871,6 +1090,75 @@ def add_dimension(args: dict[str, Any]) -> dict[str, Any]:
     return result(True, "Added a dimension.", sketch_status=status, **applied)
 
 
+@tool("add_3d_dimension", "Create a native X/Y/Z projected linear dimension between two points of the open 3D sketch. Indices come from list_sketch_points. Values/placement are mm; an optional value is applied in all configurations, while geometry is verified in the active one. Rebuilds to solve deferred geometry, restores the same edit context, and verifies native dimension plus actual projected point distance. Native assembly Z may be refused and is reported as failure.",
+      {"axis":{"type":"string","enum":["x","y","z"]},"point_indices":{"type":"array","items":{"type":"integer","minimum":0},"minItems":2,"maxItems":2,"uniqueItems":True},
+       "value_mm":{"type":"number","minimum":0},"place_x_mm":{"type":"number","default":0},"place_y_mm":{"type":"number","default":0},"place_z_mm":{"type":"number","default":0}},["axis","point_indices"])
+def add_3d_dimension(args):
+    app,doc=active_document()
+    sketch=_active_sketch(doc)
+    if not bool(value(sketch,"Is3D")):
+        raise RuntimeError("Axis dimensions require an open 3D sketch.")
+    axis=str(args["axis"])
+    if axis not in ("x","y","z"):
+        raise RuntimeError("Axis must be x, y or z.")
+    indices=[int(i) for i in args["point_indices"]]
+    points=sketch_point_objects(doc)
+    if len(indices)!=2 or indices[0]==indices[1] or any(i<0 or i>=len(points) for i in indices):
+        raise RuntimeError("Select two distinct valid native sketch point indices.")
+    selected=[points[i] for i in indices]
+    references=[persistent_reference_id(doc,p) for p in selected]
+    if not all(references) or references[0]==references[1]:
+        raise RuntimeError("Cannot confirm two distinct native point references.")
+    coordinate=axis.upper()
+    before_distance=abs(float(value(selected[1],coordinate))-float(value(selected[0],coordinate)))
+    expected=before_distance
+    if args.get("value_mm") is not None:
+        expected=float(args["value_mm"])/1000
+    placement=[float(args.get(f"place_{k}_mm",0))/1000 for k in "xyz"]
+    if expected<0 or not all(math.isfinite(v) for v in [expected,*placement]):
+        raise RuntimeError("Dimension values and placement must be finite; the distance cannot be negative.")
+    name=sketch_name_for_object(doc,sketch)
+    original_reference=persistent_reference_id(doc,sketch)
+    require_selection(doc,{"sketch_points":indices})
+    method=f"AddAlong{coordinate}Dimension"
+    try:
+        selection=flag_methods(doc.SelectionManager,"GetSelectedObjectCount2","GetSelectedObject6")
+        selected_references=[persistent_reference_id(doc,selection.GetSelectedObject6(i,-1)) for i in range(1,selection.GetSelectedObjectCount2(-1)+1)]
+        if selected_references!=references:
+            return result(False,"Native selection did not retain the requested point references.",axis=axis,selected_references_confirmed=False)
+        with dimension_dialog_suppressed(app):
+            display=getattr(flag_methods(sketch_manager(doc),method),method)(*placement)
+        if display is None:
+            return result(False,"SOLIDWORKS did not create the projected 3D dimension.",axis=axis,projected_before_mm=before_distance*1000,
+                          selected_references_confirmed=True,sketch_status=_sketch_status(doc))
+        dimension=flag_methods(display,"GetDimension2").GetDimension2(0)
+        if dimension is None:
+            return result(False,"Display dimension created, but its native dimension is unavailable.",axis=axis)
+        full_name=str(value(dimension,"FullName"))
+        display_type=int(value(display,"Type2"))
+        code=0
+        if args.get("value_mm") is not None:
+            code=int(flag_methods(dimension,"SetSystemValue3").SetSystemValue3(expected,2,empty_variant()))
+    finally:
+        clear_selection(doc)
+    rebuilt=rebuild(doc)
+    context=doc.SketchManager.ActiveSketch
+    if context is None:
+        reopened=edit_sketch({"sketch_name":name})
+        context=doc.SketchManager.ActiveSketch
+        restored=bool(reopened["ok"]) and context is not None and persistent_reference_id(doc,context)==original_reference
+    else:
+        restored=bool(value(context,"Is3D")) and persistent_reference_id(doc,context)==original_reference
+    actual=float(value(dimension,"SystemValue"))
+    after={persistent_reference_id(doc,p):p for p in sketch_point_objects(doc,name)}
+    same_points=all(r in after for r in references)
+    distance=abs(float(value(after[references[1]],coordinate))-float(value(after[references[0]],coordinate))) if same_points else None
+    confirmed=rebuilt and restored and display_type==2 and code==0 and abs(actual-expected)<=1e-9 and distance is not None and abs(distance-expected)<=1e-5
+    return result(confirmed,"Created and verified a projected 3D dimension." if confirmed else "Dimension created, but its value, geometry or edit context could not be confirmed.",
+                  axis=axis,full_name=full_name,value_mm=actual*1000,projected_distance_mm=distance*1000 if distance is not None else None,
+                  display_type=display_type,set_value_status=code,rebuild_ok=rebuilt,edit_context_restored=restored,point_references_confirmed=same_points)
+
+
 @tool(
     "set_dimension",
     "Change an existing dimension by its full name, for example 'D1@草图1'. Use list_dimensions to "
@@ -913,7 +1201,7 @@ def set_dimension(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "list_dimensions",
-    "Read-only: list every driving dimension in the document, or only those of one feature/sketch, "
+    "Read-only: list native driving/driven display dimensions in the document, or only those of one feature/sketch. Reports driven_state 0=unknown, 1=driven, 2=driving, "
     "with the full names that set_dimension takes.",
     {"feature_name": {"type": "string", "description": "Restrict to one feature or sketch."}},
 )
@@ -942,7 +1230,8 @@ def list_dimensions(args: dict[str, Any]) -> dict[str, Any]:
                     "owner": owner,
                     "full_name": full_name,
                     "name": str(safe(dimension, "Name", "")),
-                    "driven": bool(safe(dimension, "DrivenState", 1) == 2),
+                    "driven": bool(safe(dimension, "DrivenState", 0) == 1),
+                    "driven_state": int(safe(dimension, "DrivenState", 0)),
                 }
                 # Dimension type 3 is angular in swDimensionType_e; everything
                 # else we surface here is a length.

@@ -350,6 +350,11 @@ _FEATURE_MANAGER_METHODS = (
     "InsertFeatureChamfer", "InsertRib", "InsertMultiFaceDraft", "SimpleHole2",
     "InsertProtrusionSwept4", "InsertCutSwept5", "InsertProtrusionBlend2", "InsertCutBlend",
     "FeatureLinearPattern5", "FeatureCircularPattern5", "InsertMirrorFeature2", "InsertRefPlane",
+    # Older variants that call_versioned falls back to on builds without the
+    # newer names above (SOLIDWORKS 2016 has FeatureCut3 but no FeatureCut4).
+    # Newer builds keep the old names, so flagging them costs nothing there.
+    "FeatureCut3", "InsertProtrusionSwept3", "InsertCutSwept4",
+    "FeatureLinearPattern4", "FeatureCircularPattern4",
 )
 
 _EXTENSION_METHODS = (
@@ -367,6 +372,7 @@ _MODEL_DOC_METHODS = (
     # IModelDoc2
     "ClearSelection2", "InsertSketch2", "SketchFillet2", "SketchChamfer", "SketchMirror", "SketchOffset2",
     "InsertFeatureShell", "InsertAxis2", "ShowNamedView2", "Parameter", "Save3", "SaveAs",
+    "Insert3DSketch2", "Insert3DSketch",
     # IPartDoc
     "SetMaterialPropertyName2", "GetMaterialPropertyName2", "GetPartBox", "GetBodies2",
     # IAssemblyDoc
@@ -390,6 +396,30 @@ def extension(doc: Any) -> Any:
 
 def selectable(obj: Any) -> Any:
     return flag_methods(obj, "Select2", "Select4")
+
+
+def call_versioned(obj: Any, *candidates: tuple[str, Sequence[Any]]) -> Any:
+    """Call the first member of ``obj`` that this SOLIDWORKS build exposes.
+
+    Each release adds numbered variants -- FeatureCut4 over FeatureCut3 -- whose
+    argument list extends the older one, while the older name keeps working.
+    List the newest first with its full arguments and the older ones with the
+    prefix they take; a build that lacks the newer name (SOLIDWORKS 2016 has
+    no FeatureCut4) silently gets the older call, and a build that has it never
+    pays for the fallback. Method availability is checked on this object:
+    a failed flag on another interface does not prove this member is absent.
+    """
+    last: Exception | None = None
+    for name, args in candidates:
+        try:
+            method = getattr(obj, name)
+        except AttributeError as exc:
+            _UNFLAGGABLE_NAMES.add(name)
+            last = exc
+            continue
+        return method(*args)
+    names = ", ".join(name for name, _ in candidates)
+    raise RuntimeError(f"This SOLIDWORKS build exposes none of: {names}.") from last
 
 
 def safe(obj: Any, member: str, default: Any = None) -> Any:
@@ -421,8 +451,30 @@ def dispatch_array(values: Sequence[Any]) -> Any:
     return win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, tuple(values))
 
 
+def integer_array(values: Sequence[int]) -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_I4, tuple(int(v) for v in values))
+
+
 def byref_long(initial: int = 0) -> Any:
     return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, initial)
+
+
+def byref_variant() -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_VARIANT, None)
+
+
+def byref_double(initial: float = 0) -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_R8, float(initial))
+
+
+def byref_dispatch() -> Any:
+    return win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_DISPATCH, None)
+
+
+def persistent_reference_id(doc: Any, obj: Any) -> bytes:
+    raw = flag_methods(value(doc, "Extension"), "GetPersistReference3").GetPersistReference3(obj)
+    # Freeze native memoryviews before a rollback, rebuild or edit changes them.
+    return bytes(raw) if raw is not None else b""
 
 
 def as_list(com_array: Any) -> list[Any]:
@@ -439,12 +491,58 @@ def as_list(com_array: Any) -> list[Any]:
 # --------------------------------------------------------------------------
 
 
+_SESSION_PID: int | None = None
+
+
+def selected_session_pid() -> int:
+    if _SESSION_PID is not None:
+        return _SESSION_PID
+    raw = os.environ.get("SW_MCP_SESSION_PID", "0")
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("SW_MCP_SESSION_PID must be a non-negative process ID.") from exc
+    if pid < 0:
+        raise RuntimeError("SW_MCP_SESSION_PID must be a non-negative process ID.")
+    return pid
+
+
+def session_monikers() -> list[tuple[int, Any]]:
+    pythoncom.CoInitialize()
+    rot = pythoncom.GetRunningObjectTable()
+    context = pythoncom.CreateBindCtx(0)
+    sessions = []
+    for moniker in rot:
+        try:
+            name = moniker.GetDisplayName(context, None)
+        except pythoncom.com_error:
+            continue
+        prefix = "SolidWorks_PID_"
+        if name.startswith(prefix) and name[len(prefix):].isdigit():
+            sessions.append((int(name[len(prefix):]), moniker))
+    return sorted(sessions, key=lambda item: item[0])
+
+
+def session_app(pid: int) -> Any:
+    pythoncom.CoInitialize()
+    if pid == 0:
+        return flag_methods(win32com.client.GetActiveObject("SldWorks.Application"), *_APP_METHODS)
+    for candidate, moniker in session_monikers():
+        if candidate == pid:
+            dispatch = pythoncom.GetRunningObjectTable().GetObject(moniker).QueryInterface(pythoncom.IID_IDispatch)
+            return flag_methods(win32com.client.Dispatch(dispatch), *_APP_METHODS)
+    raise RuntimeError(f"SolidWorks session {pid} is no longer registered. List sessions and select an existing process ID.")
+
+
 def running_app() -> Any:
     """Attach only to an already-running SOLIDWORKS session; never start one."""
     pythoncom.CoInitialize()
+    pid = selected_session_pid()
     try:
-        app = win32com.client.GetActiveObject("SldWorks.Application")
+        app = session_app(pid)
     except Exception as exc:
+        if pid:
+            raise RuntimeError(f"Cannot attach to selected SolidWorks session {pid}; no other session was substituted.") from exc
         raise RuntimeError(
             "No running SOLIDWORKS session is available. Open SOLIDWORKS and finish any modal dialogs first."
         ) from exc
@@ -582,7 +680,7 @@ def reference_axes(doc: Any) -> list[str]:
 
 
 def sketch_features(doc: Any) -> list[Any]:
-    return [f for f in iter_feature_objects(doc) if feature_property(f, "GetTypeName2", "") == "ProfileFeature"]
+    return [f for f in iter_feature_objects(doc) if feature_property(f, "GetTypeName2", "") in ("ProfileFeature", "3DProfileFeature")]
 
 
 def sketch_names(doc: Any) -> list[str]:
@@ -598,27 +696,42 @@ def latest_sketch(doc: Any) -> tuple[str, Any]:
     return str(feature_property(feature, "Name", "")), feature
 
 
+def sketch_name_for_object(doc: Any, sketch: Any) -> str:
+    reference = persistent_reference_id(doc, sketch)
+    if reference:
+        for feature in sketch_features(doc):
+            specific = value(feature, "GetSpecificFeature2")
+            if specific is not None and persistent_reference_id(doc, specific) == reference:
+                return str(value(feature, "Name"))
+    raise RuntimeError("Cannot identify the active sketch feature from its native reference.")
+
+
 def resolve_sketch(doc: Any, sketch_name: str | None) -> tuple[str, Any]:
     """Resolve an explicit sketch name, or fall back to the newest sketch."""
     if sketch_name:
         feature = find_feature(doc, sketch_name)
         if feature is None:
             raise RuntimeError(f"No feature named '{sketch_name}' exists in this document.")
-        if feature_property(feature, "GetTypeName2", "") != "ProfileFeature":
+        if feature_property(feature, "GetTypeName2", "") not in ("ProfileFeature", "3DProfileFeature"):
             raise RuntimeError(f"Feature '{sketch_name}' is not a sketch.")
         return sketch_name, feature
     return latest_sketch(doc)
 
 
+def toggle_sketch(doc: Any, is_3d: bool) -> None:
+    if is_3d:
+        flag_methods(doc, "Insert3DSketch2", "Insert3DSketch")
+        call_versioned(doc, ("Insert3DSketch2", (True,)), ("Insert3DSketch", ()))
+    else:
+        sketch_manager(doc).InsertSketch(True)
+
+
 def exit_active_sketch(doc: Any) -> None:
-    try:
+    active = doc.SketchManager.ActiveSketch
+    if active is not None:
+        toggle_sketch(doc, bool(value(active, "Is3D")))
         if doc.SketchManager.ActiveSketch is not None:
-            sketch_manager(doc).InsertSketch(True)
-    except Exception:
-        try:
-            doc.InsertSketch2(True)
-        except Exception:
-            pass
+            raise RuntimeError("SOLIDWORKS did not close the active sketch.")
 
 
 def select_sketch_for_feature(doc: Any, sketch_name: str | None) -> str:
@@ -693,6 +806,14 @@ def select_object(doc: Any, obj: Any, mark: int = 0, append: bool = True) -> boo
         return False
 
 
+def select_body(doc: Any, body: Any, mark: int = 0, append: bool = True) -> bool:
+    """IBody2.Select2 takes ISelectData, unlike IFeature.Select2's integer mark."""
+    selection_manager = flag_methods(doc.SelectionManager, "CreateSelectData")
+    data = selection_manager.CreateSelectData()
+    data.Mark = mark
+    return bool(flag_methods(body, "Select2").Select2(append, data))
+
+
 def resolve_plane_name(doc: Any, name: str, planes: Sequence[str] | None = None) -> str:
     """Accept either an exact localized plane name or front/top/right.
 
@@ -764,7 +885,8 @@ def component_bodies(component: Any, body_type: int = BODY_SOLID) -> list[Any]:
     except Exception:
         pass
     try:
-        return as_list(safe(component, "GetBody"))
+        bodies = as_list(safe(component, "GetBody"))
+        return bodies if body_type == BODY_ALL else [body for body in bodies if safe(body, "GetType") == body_type]
     except Exception:
         return []
 
@@ -845,7 +967,7 @@ def _face_point(face: Any, matrix: Sequence[float] | None = None) -> list[float]
     return _point_on(face, safe(face, "GetBox"), matrix)
 
 
-def iter_face_objects(doc: Any) -> list[tuple[Any, list[float] | None]]:
+def iter_face_objects(doc: Any, body_type: int = BODY_SOLID) -> list[tuple[Any, list[float] | None]]:
     """Every face as (object, component transform), in list_faces index order.
 
     Selecting a face needs the COM object, and a point on it only if selecting
@@ -858,16 +980,16 @@ def iter_face_objects(doc: Any) -> list[tuple[Any, list[float] | None]]:
     """
     return [
         (face, matrix)
-        for body, _, matrix in iter_body_context(doc)
+        for body, _, matrix in iter_body_context(doc, body_type)
         for face in as_list(safe(body, "GetFaces"))
     ]
 
 
-def iter_edge_objects(doc: Any) -> list[tuple[Any, list[float] | None]]:
+def iter_edge_objects(doc: Any, body_type: int = BODY_SOLID) -> list[tuple[Any, list[float] | None]]:
     """Every edge as (object, component transform), in list_edges index order."""
     return [
         (edge, matrix)
-        for body, _, matrix in iter_body_context(doc)
+        for body, _, matrix in iter_body_context(doc, body_type)
         for edge in as_list(safe(body, "GetEdges"))
     ]
 
@@ -920,10 +1042,10 @@ def rotate_vector(vector: Sequence[float], matrix: Sequence[float] | None) -> li
     ]
 
 
-def enumerate_faces(doc: Any) -> list[dict[str, Any]]:
+def enumerate_faces(doc: Any, body_type: int = BODY_SOLID) -> list[dict[str, Any]]:
     faces: list[dict[str, Any]] = []
     index = 0
-    for body_index, (body, body_name, matrix) in enumerate(iter_body_context(doc)):
+    for body_index, (body, body_name, matrix) in enumerate(iter_body_context(doc, body_type)):
         for face in as_list(safe(body, "GetFaces")):
             entry: dict[str, Any] = {"index": index, "body_index": body_index, "body": body_name, "_obj": face}
             point = _point_on(face, safe(face, "GetBox"), matrix)
@@ -985,10 +1107,10 @@ def _edge_endpoints(edge: Any, matrix: Sequence[float] | None = None) -> dict[st
     return endpoints
 
 
-def enumerate_edges(doc: Any) -> list[dict[str, Any]]:
+def enumerate_edges(doc: Any, body_type: int = BODY_SOLID) -> list[dict[str, Any]]:
     edges: list[dict[str, Any]] = []
     index = 0
-    for body_index, (body, body_name, matrix) in enumerate(iter_body_context(doc)):
+    for body_index, (body, body_name, matrix) in enumerate(iter_body_context(doc, body_type)):
         for edge in as_list(safe(body, "GetEdges")):
             entry: dict[str, Any] = {"index": index, "body_index": body_index, "body": body_name, "_obj": edge}
             point = _edge_point(edge, matrix)
@@ -1055,9 +1177,7 @@ def enumerate_sketch_segments(doc: Any, sketch_name: str | None = None) -> tuple
             raise RuntimeError("The drawing has no active sketch. Activate a view first.")
         resolved_name = "<active drawing view>"
     elif sketch is not None and not sketch_name:
-        # ISketch has no accessor back to its feature in this type library, and
-        # the open sketch is always the newest ProfileFeature in the tree.
-        resolved_name, _ = latest_sketch(doc)
+        resolved_name = sketch_name_for_object(doc, sketch)
     else:
         resolved_name, feature = resolve_sketch(doc, sketch_name)
         sketch = value(feature, "GetSpecificFeature2")
@@ -1137,6 +1257,8 @@ SELECTION_SCHEMA = {
     "properties": {
         "faces": {"type": "array", "items": {"type": "integer"}, "description": "Face indices from list_faces."},
         "edges": {"type": "array", "items": {"type": "integer"}, "description": "Edge indices from list_edges."},
+        "surface_faces": {"type": "array", "items": {"type": "integer", "minimum": 0}, "description": "Face indices from list_faces(body_type=surface), separate from solid faces."},
+        "surface_edges": {"type": "array", "items": {"type": "integer", "minimum": 0}, "description": "Edge indices from list_edges(body_type=surface), separate from solid edges."},
         "vertices": {"type": "array", "items": {"type": "integer"}, "description": "Vertex indices from list_vertices."},
         "face_edges": {
             "type": "array",
@@ -1169,6 +1291,7 @@ SELECTION_SCHEMA = {
         "sketch_points": {"type": "array", "items": {"type": "integer"}, "description": "Sketch point indices."},
         "sketch_name": {"type": "string", "description": "Which sketch sketch_segments/sketch_points refer to. Defaults to the open sketch."},
         "bodies": {"type": "array", "items": {"type": "integer"}, "description": "Solid-body indices."},
+        "surface_bodies": {"type": "array", "items": {"type": "integer", "minimum": 0}, "description": "Surface-body indices from list_surface_bodies; separate from solid-body indices."},
         "components": {"type": "array", "items": {"type": "string"}, "description": "Assembly component names."},
         "points": {
             "type": "array",
@@ -1280,6 +1403,14 @@ def apply_selection(doc: Any, spec: dict[str, Any] | None, mark: int = 0, append
         count += _select_indexed_objects(
             doc, iter_edge_objects(doc), spec["edges"], SELECT_TYPE_EDGE, mark, "Edge", _edge_point
         )
+    if spec.get("surface_faces"):
+        count += _select_indexed_objects(
+            doc, iter_face_objects(doc, BODY_SHEET), spec["surface_faces"], SELECT_TYPE_FACE, mark, "Surface face", _face_point
+        )
+    if spec.get("surface_edges"):
+        count += _select_indexed_objects(
+            doc, iter_edge_objects(doc, BODY_SHEET), spec["surface_edges"], SELECT_TYPE_EDGE, mark, "Surface edge", _edge_point
+        )
     if spec.get("vertices"):
         # Vertices keep the measured enumeration: it deduplicates by coordinate,
         # which means reading each point anyway.
@@ -1368,8 +1499,17 @@ def apply_selection(doc: Any, spec: dict[str, Any] | None, mark: int = 0, append
         index = int(raw_index)
         if not 0 <= index < len(bodies):
             raise RuntimeError(f"Body index {index} is out of range (0..{len(bodies) - 1}).")
-        if not select_object(doc, bodies[index], mark, True):
+        if not select_body(doc, bodies[index], mark, True):
             raise RuntimeError(f"Could not select body {index}.")
+        count += 1
+
+    surface_bodies = get_bodies(doc, BODY_SHEET) if spec.get("surface_bodies") else []
+    for raw_index in spec.get("surface_bodies", []):
+        index = int(raw_index)
+        if not 0 <= index < len(surface_bodies):
+            raise RuntimeError(f"Surface-body index {index} is out of range (0..{len(surface_bodies) - 1}).")
+        if not select_body(doc, surface_bodies[index], mark, True):
+            raise RuntimeError(f"Could not select surface body {index}.")
         count += 1
 
     if spec.get("components"):
