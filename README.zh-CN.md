@@ -65,4 +65,4 @@ python tests/live_p0_regression.py                      # 实机，需 SOLIDWORK
 
 ## 许可证
 
-Apache License 2.0 —— 见 [LICENSE](LICENSE)。版权 2026 JIALE LIU。
+Apache License 2.0 —— 见 [LICENSE](LICENSE) 与[简体中文说明](LICENSE.zh-CN.md)。版权 2026 JIALE LIU。

@@ -1,5 +1,7 @@
 # Releasing
 
+English | [简体中文](RELEASING.zh-CN.md)
+
 The MCP Registry stores metadata only, not artifacts, so a release is two
 publishes in order: the package to PyPI first, then the registry entry that
 points at it. The registry validates the PyPI package before accepting the

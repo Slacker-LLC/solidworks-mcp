@@ -1,28 +1,27 @@
-# 仓库约定（自动化 agent 必读）
+# Agent instructions / 仓库约定
 
-## 语言
+## Language / 语言
 
-- 仓库产物以英文为主：文档、提交信息正文、PR 标题与正文。简体中文作为第二语言，
-  与英文成对维护（`README.zh-CN.md`、`COVERAGE.zh-CN.md`），改动需同步。
-- 与用户的对话可以使用简体中文。
-- 代码、标识符、路径、命令、配置键名、工具专有名词保持原样；引用报错先原样贴出再解释。
+- Repository documents are English-first with Simplified Chinese counterparts. Keep the `README`, `COVERAGE`, `CONTRIBUTING`, `RELEASING` and license-note pairs in sync; this file carries both languages. Commit messages and pull requests are English-first.
+- User conversations may be in Simplified Chinese. Keep code, identifiers, paths, commands, configuration keys and tool names unchanged. Quote errors before explaining them.
 
-## 合并权限
+- 仓库文档以英文为主，并提供简体中文版。同步维护 `README`、`COVERAGE`、`CONTRIBUTING`、`RELEASING` 和许可证说明的中英文版本；本文件包含两种语言。提交信息和 PR 以英文为主。
+- 与用户的对话可以使用简体中文。代码、标识符、路径、命令、配置键名和工具名称保持原样；先引用报错原文再解释。
 
-`main` 已启用分支保护：任何改动都必须经过 pull request，必须通过 `tests` 工作流的四个
-`offline` 状态检查（Python 3.10–3.13），必须解决全部会话，禁止强推，禁止删除分支，
-且保护对管理员同样生效（enforce admins）。
+## Merge permissions / 合并权限
 
-自动化只负责：创建分支、提交、推送分支、开 PR、等 CI 结果，然后把 PR 留在原地。
+- `main` is protected. Changes require a pull request and all four `offline` checks (Python 3.10–3.13); conversations must be resolved. Force pushes and branch deletion are blocked, including for administrators.
+- Automation may create branches, commit, push branches, open pull requests and wait for CI. **Do not merge pull requests, push directly to `main`, or change branch protection.** The repository owner (@Slacker-LLC) merges.
 
-- **不要合并任何 pull request，也不要直接推送 `main`。**
-- **不要关闭、放宽或绕过分支保护。**
-- 合并由仓库所有者（@Slacker-LLC）手动完成。
+- `main` 已启用保护。所有改动必须经过 PR，并通过四个 `offline` 检查（Python 3.10–3.13）；必须解决全部会话。管理员也不能强推或删除分支。
+- 自动化可以创建分支、提交、推送分支、开 PR 并等待 CI。**不得合并 PR、直接推送 `main` 或更改分支保护。** PR 由仓库所有者（@Slacker-LLC）合并。
 
-## 验证要求
+## Verification / 验证要求
 
-- 任何改动先跑 `python -m unittest discover -s tests -p 'test_*.py'`。
-- 涉及 COM、几何或 SOLIDWORKS 状态的改动，必须再跑对应的 `tests/live_*_regression.py`，
-  并读回真实几何、面积、体积或原生定义；不能把返回码当作成功。
-- PR 正文必须写清：改了什么、为什么、如何验证、仍然存在的缺口。失败项按事实记录为失败，
-  不得包装成已完成。
+- Before code changes, run `python -m unittest discover -s tests -p 'test_*.py'`.
+- For COM, geometry or SOLIDWORKS-state changes, also run the relevant `tests/live_*_regression.py` and read back actual geometry, area, volume or native definitions. A return code alone is not proof of success.
+- Pull request descriptions state what changed, why, how it was verified and any remaining gaps. Report failures as failures.
+
+- 代码改动前运行 `python -m unittest discover -s tests -p 'test_*.py'`。
+- 涉及 COM、几何或 SOLIDWORKS 状态的改动，还要运行对应的 `tests/live_*_regression.py`，并读回真实几何、面积、体积或原生定义。不能只凭返回码判定成功。
+- PR 正文说明改动内容、原因、验证方式和剩余缺口；失败项如实记录为失败。

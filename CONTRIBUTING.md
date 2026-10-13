@@ -1,5 +1,7 @@
 # Contributing
 
+English | [简体中文](CONTRIBUTING.zh-CN.md)
+
 ## What the tests can and cannot tell you
 
 The offline suite — `python -m unittest discover -s tests -p 'test_*.py'`, 225
@@ -117,12 +119,10 @@ arbitrary code execution inside the user's CAD session.
 
 ## Language
 
-English is the primary language of the repository: documentation, code
-comments, commit messages and pull requests. Simplified Chinese is the
-secondary language — `README.zh-CN.md` and `COVERAGE.zh-CN.md` mirror their
-English counterparts and are expected to move together in the same pull
-request. Code, identifiers, command lines and error text stay in their original
-form in both.
+Repository documents are English-first with Simplified Chinese versions. Keep
+the README, coverage, contributing, release and license-note pairs in sync;
+`AGENTS.md` carries both languages. Keep code, identifiers, commands and error
+text unchanged.
 
 ## Branch protection, and who merges
 

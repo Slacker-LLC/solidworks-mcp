@@ -1,30 +1,32 @@
-name: Bug report
-description: A tool did something other than what it reported
+name: Bug report / Bug 报告
+description: A tool did something other than reported / 工具实际行为与报告不符
 labels: [bug]
 
 body:
   - type: markdown
     attributes:
       value: |
-        Most failures here are SOLIDWORKS returning null rather than raising, so
-        the useful report is what the *model* ended up as, not just the error text.
+        Most failures are SOLIDWORKS returning null rather than raising. Report
+        what the *model* ended up as, not just the error text.
+
+        多数失败是 SOLIDWORKS 返回 null 而不是抛出异常。请描述模型最终状态，不要只贴错误文本。
 
   - type: input
     id: sw-version
     attributes:
-      label: SOLIDWORKS version and UI language
-      placeholder: "2026 SP3.2, Simplified Chinese"
+      label: SOLIDWORKS version and UI language / SOLIDWORKS 版本与界面语言
+      placeholder: "2026 SP3.2, Simplified Chinese / 2026 SP3.2，简体中文界面"
     validations:
       required: true
 
   - type: input
     id: install-source
     attributes:
-      label: Install source and server version
+      label: Install source and server version / 安装来源与服务器版本
       description: >
-        Where this copy came from (git checkout with its commit, wheel path,
-        installed package) and the version from
-        python -c "import solidworks_mcp; print(solidworks_mcp.__version__)".
+        Source of this copy (git commit, wheel or installed package) and the
+        version from python -c "import solidworks_mcp; print(solidworks_mcp.__version__)".
+        来源（git 提交、wheel 或已安装包）以及上述命令输出的版本。
       placeholder: "git checkout ff50276 / wheel 0.1.0 — solidworks_mcp 0.1.0"
     validations:
       required: true
@@ -32,7 +34,7 @@ body:
   - type: input
     id: python-version
     attributes:
-      label: Python version
+      label: Python version / Python 版本
       placeholder: "3.12.4"
     validations:
       required: true
@@ -40,7 +42,7 @@ body:
   - type: input
     id: host
     attributes:
-      label: MCP host
+      label: MCP host / MCP 宿主
       placeholder: "Claude Desktop / Claude Code / Codex CLI"
     validations:
       required: true
@@ -48,8 +50,8 @@ body:
   - type: textarea
     id: call
     attributes:
-      label: The tool call
-      description: Tool name and arguments, as JSON.
+      label: The tool call / 工具调用
+      description: Tool name and arguments, as JSON. / 请用 JSON 填写工具名和参数。
       render: json
     validations:
       required: true
@@ -57,7 +59,7 @@ body:
   - type: textarea
     id: reply
     attributes:
-      label: What the tool replied
+      label: What the tool replied / 工具返回内容
       render: json
     validations:
       required: true
@@ -65,22 +67,23 @@ body:
   - type: textarea
     id: actual
     attributes:
-      label: What the model actually looked like afterwards
+      label: What the model actually looked like afterwards / 调用后的模型实际状态
       description: >
         Output from check_errors, list_faces / list_edges, get_mass_properties,
-        or a screenshot — whatever shows the discrepancy. A tool reporting
-        success proves nothing on its own.
+        or a screenshot — evidence of the discrepancy. A success message alone
+        does not verify the result.
+        请提供 check_errors、list_faces / list_edges、get_mass_properties 的输出或截图，说明实际差异。仅有成功消息不能证明结果正确。
     validations:
       required: true
 
   - type: checkboxes
     id: preconditions
     attributes:
-      label: Preconditions
+      label: Preconditions / 前置条件
       options:
-        - label: SOLIDWORKS was already running, with a document open
+        - label: SOLIDWORKS was already running, with a document open / SOLIDWORKS 已运行且打开了文档
           required: true
-        - label: No modal dialog was waiting behind the SOLIDWORKS window
+        - label: No modal dialog was waiting behind the SOLIDWORKS window / SOLIDWORKS 窗口后面没有等待处理的模态对话框
           required: true
-        - label: I re-listed faces/edges after the last geometry change, rather than reusing cached indices
+        - label: I re-listed faces/edges after the last geometry change / 最近一次几何变化后重新列举了面和边
           required: false

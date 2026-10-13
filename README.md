@@ -69,4 +69,4 @@ Contributor notes: [CONTRIBUTING.md](CONTRIBUTING.md) · release process:
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE). Copyright 2026 JIALE LIU.
+Apache License 2.0 — see [LICENSE](LICENSE) and the [Simplified Chinese note](LICENSE.zh-CN.md). Copyright 2026 JIALE LIU.
