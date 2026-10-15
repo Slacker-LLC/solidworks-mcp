@@ -57,6 +57,32 @@ Lengths are `_mm`, angles `_deg`. Geometry is passed as a `selection` object
 (`{"edges": [4, 6, 9]}`, `{"planes": ["front"]}`); indices describe the current
 model, so re-list them after a geometry change.
 
+### Exact document templates
+
+`create_new_document` and `create_drawing` accept an optional absolute or
+relative `template_path`. An explicit path must name an existing readable
+template whose extension matches the requested document type; it is passed
+unchanged after path resolution to `ISldWorks.NewDocument`. An explicit request
+never falls back to another template.
+
+```json
+{"kind": "part", "template_path": "C:\\CAD\\Templates\\Machined Part.PRTDOT"}
+```
+
+```json
+{"template_path": "C:\\CAD\\Templates\\A4 Landscape.DRWDOT", "first_angle": true}
+```
+
+When `template_path` is omitted, the connector retains its existing precedence:
+the SOLIDWORKS configured default first, then discovery through
+`SW_MCP_TEMPLATE_DIR` and the standard template locations. Results identify the
+selection source as `explicit`, `solidworks_default`, or `discovered`, and verify
+the resulting document type. SOLIDWORKS does not provide reliable originating
+template-path readback for part and assembly documents, so the result reports
+that limitation instead of claiming native source verification. Drawing results
+also read back the active sheet size, scale, projection method, and sheet-format
+path when SOLIDWORKS exposes it.
+
 ## Testing
 
 ```powershell
@@ -70,3 +96,4 @@ Contributor notes: [CONTRIBUTING.md](CONTRIBUTING.md) · release process:
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) and the [Simplified Chinese note](LICENSE.zh-CN.md). Copyright 2026 JIALE LIU.
+

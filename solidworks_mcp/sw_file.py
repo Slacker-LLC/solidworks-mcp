@@ -30,6 +30,7 @@ from .sw_core import (
     document_info,
     document_type,
     double_array,
+    DOC_TYPES,
     EXPORT_EXTENSIONS,
     extension,
     invoke_no_arg,
@@ -41,6 +42,7 @@ from .sw_core import (
     result,
     running_app,
     safe,
+    TEMPLATE_SUFFIXES,
     discover_template,
     tool,
     value,
@@ -126,33 +128,144 @@ def get_active_document_info(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "create_new_document",
-    "Create a new SOLIDWORKS part, assembly, or drawing from the configured default template.",
-    {"kind": {"type": "string", "enum": ["part", "assembly", "drawing"]}},
+    "Create a new SOLIDWORKS part, assembly, or drawing. Pass template_path to require an exact "
+    "local template; explicit templates never fall back to configured or discovered defaults.",
+    {
+        "kind": {"type": "string", "enum": ["part", "assembly", "drawing"]},
+        "template_path": {
+            "type": "string",
+            "description": "Optional exact local .prtdot, .asmdot, or .drwdot path.",
+        },
+    },
     ["kind"],
 )
 def create_new_document(args: dict[str, Any]) -> dict[str, Any]:
-    return new_document(str(args["kind"]))
+    return new_document(str(args["kind"]), args.get("template_path"))
 
 
-def new_document(kind: str) -> dict[str, Any]:
-    app = running_app()
+def _template_details(
+    path: Path | None,
+    source: str,
+    requested_path: str | None = None,
+    *,
+    exists: bool | None = None,
+    readable: bool | None = None,
+    extension_valid: bool | None = None,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "requested_path": requested_path,
+        "resolved_path": str(path) if path is not None else "",
+        "source": source,
+    }
+    if exists is not None:
+        details["exists"] = exists
+    if readable is not None:
+        details["readable"] = readable
+    if extension_valid is not None:
+        details["extension_valid"] = extension_valid
+    return details
+
+
+def _explicit_template(kind: str, raw_path: Any) -> tuple[Path | None, dict[str, Any], str | None]:
+    requested = str(raw_path or "").strip()
+    expected_suffix = TEMPLATE_SUFFIXES[kind]
+    if not requested:
+        details = _template_details(None, "explicit", requested, exists=False, readable=False, extension_valid=False)
+        return None, details, "template_path must not be empty."
+    try:
+        path = Path(requested).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        details = _template_details(None, "explicit", requested, exists=False, readable=False, extension_valid=False)
+        return None, details, f"Could not resolve template_path: {exc}"
+    extension_valid = path.suffix.lower() == expected_suffix
+    exists = path.is_file()
+    details = _template_details(
+        path, "explicit", requested, exists=exists, readable=False, extension_valid=extension_valid
+    )
+    if not extension_valid:
+        return None, details, f"A {kind} document requires a {expected_suffix} template, not {path.suffix or '<none>'}."
+    if not exists:
+        return None, details, f"No such template file: {path}"
+    try:
+        with path.open("rb") as stream:
+            stream.read(1)
+    except OSError as exc:
+        return None, details, f"Template is not readable: {path} ({exc})"
+    details["readable"] = True
+    return path, details, None
+
+
+def new_document(kind: str, template_path: Any = None) -> dict[str, Any]:
     preference = {"part": 1, "assembly": 2, "drawing": 3}.get(kind)
     if preference is None:
         return result(False, "kind must be part, assembly, or drawing.")
-    template = app.GetUserPreferenceStringValue(preference)
-    if not template or not Path(str(template)).is_file():
-        fallback = discover_template(kind)
-        if fallback is None:
-            return result(
-                False,
-                f"No default {kind} template is configured in SOLIDWORKS and none could be found on disk. "
-                "Set one under Tools > Options > File Locations, or point SW_MCP_TEMPLATE_DIR at your templates.",
-            )
-        template = str(fallback)
-    doc = app.NewDocument(template, 0, 0.0, 0.0)
+    if template_path is not None:
+        template, template_info, error = _explicit_template(kind, template_path)
+        if error is not None or template is None:
+            return result(False, error or "Invalid explicit template.", template=template_info)
+        app = running_app()
+    else:
+        app = running_app()
+        configured = app.GetUserPreferenceStringValue(preference)
+        if configured and Path(str(configured)).is_file():
+            template = Path(str(configured)).expanduser().resolve()
+            source = "solidworks_default"
+        else:
+            fallback = discover_template(kind)
+            if fallback is None:
+                return result(
+                    False,
+                    f"No default {kind} template is configured in SOLIDWORKS and none could be found on disk. "
+                    "Set one under Tools > Options > File Locations, or point SW_MCP_TEMPLATE_DIR at your templates.",
+                )
+            template = fallback.resolve()
+            source = "discovered"
+        template_info = _template_details(
+            template,
+            source,
+            exists=True,
+            readable=True,
+            extension_valid=template.suffix.lower() == TEMPLATE_SUFFIXES[kind],
+        )
+    doc = app.NewDocument(str(template), 0, 0.0, 0.0)
     if doc is None:
-        return result(False, f"SOLIDWORKS did not create a {kind} document.")
-    return result(True, f"Created new {kind} document.", document=document_info(doc))
+        return result(
+            False,
+            f"SOLIDWORKS did not create a {kind} document.",
+            template=template_info,
+            verification={
+                "expected_document_type": kind,
+                "actual_document_type": "none",
+                "document_created": False,
+                "path_supplied_to_new_document": True,
+                "source_template_readback_available": False,
+            },
+        )
+    actual_type = document_type(doc)
+    actual_name = DOC_TYPES.get(actual_type, f"unknown ({actual_type})")
+    verification = {
+        "expected_document_type": kind,
+        "actual_document_type": actual_name,
+        "document_created": True,
+        "path_supplied_to_new_document": True,
+        "source_template_readback_available": False,
+    }
+    if actual_type != preference:
+        return result(
+            False,
+            f"SOLIDWORKS created a {actual_name} document from the requested {kind} template. "
+            "The document was left open for inspection.",
+            document=document_info(doc),
+            template=template_info,
+            verification=verification,
+        )
+    return result(
+        True,
+        f"Created new {kind} document.",
+        document=document_info(doc),
+        template=template_info,
+        verification=verification,
+    )
 
 
 @tool(
@@ -385,3 +498,4 @@ def set_material(args: dict[str, Any]) -> dict[str, Any]:
             material=applied,
         )
     return result(True, f"Applied material '{name}'.", material=applied)
+

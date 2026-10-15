@@ -232,9 +232,13 @@ def _view_entry(view: Any, index: int) -> dict[str, Any]:
 
 @tool(
     "create_drawing",
-    "Create a new drawing document from the configured default template, optionally sized and "
+    "Create a new drawing document from an optional exact local template, optionally sized and "
     "scaled. Then use insert_standard_views or insert_model_view to place views.",
     {
+        "template_path": {
+            "type": "string",
+            "description": "Optional exact local .drwdot path. Explicit templates never fall back.",
+        },
         "paper_size": {"type": "string", "enum": sorted(PAPER_SIZES), "description": "Override the template's paper size."},
         "scale_numerator": {"type": "number", "default": 1},
         "scale_denominator": {"type": "number", "default": 1},
@@ -242,7 +246,7 @@ def _view_entry(view: Any, index: int) -> dict[str, Any]:
     },
 )
 def create_drawing(args: dict[str, Any]) -> dict[str, Any]:
-    created = new_document("drawing")
+    created = new_document("drawing", args.get("template_path"))
     if not created.get("ok"):
         return created
     _, doc = require_drawing()
@@ -259,30 +263,45 @@ def create_drawing(args: dict[str, Any]) -> dict[str, Any]:
             )
         except Exception as exc:
             logger.info("Sheet setup was declined: %s", exc)
-    return result(True, "Created a new drawing.", document=document_info(doc), sheets=_sheet_names(doc))
+    return result(
+        True,
+        "Created a new drawing.",
+        document=document_info(doc),
+        template=created["data"].get("template"),
+        verification=created["data"].get("verification"),
+        **_sheet_readback(doc),
+    )
 
 
 def _sheet_names(doc: Any) -> list[str]:
     return [str(n) for n in as_list(safe(doc, "GetSheetNames"))]
 
 
-@tool("list_sheets", "Read-only: list the sheets of the active drawing, with the active one marked.", {})
-def list_sheets(args: dict[str, Any]) -> dict[str, Any]:
-    _, doc = require_drawing()
+def _sheet_readback(doc: Any) -> dict[str, Any]:
     current = value(doc, "GetCurrentSheet")
     active = str(safe(current, "GetName", "") or "")
-    sheets = []
-    for name in _sheet_names(doc):
-        sheets.append({"name": name, "active": name == active})
+    payload: dict[str, Any] = {
+        "sheets": [{"name": name, "active": name == active} for name in _sheet_names(doc)],
+        "active_sheet": active,
+    }
     properties = safe(current, "GetProperties2")
-    payload: dict[str, Any] = {"sheets": sheets, "active_sheet": active}
     if properties is not None and len(properties) >= 6:
-        # [paper size, template, scale1, scale2, first angle, width, height]
+        payload["paper_size_code"] = int(properties[0])
         payload["scale"] = [float(properties[2]), float(properties[3])]
         payload["first_angle"] = bool(properties[4])
         if len(properties) >= 7:
             payload["sheet_size_mm"] = [round(to_mm(properties[5]), 2), round(to_mm(properties[6]), 2)]
-    return result(True, f"Read {len(sheets)} sheets.", **payload)
+    sheet_format = str(safe(current, "GetTemplateName", "") or "")
+    if sheet_format:
+        payload["sheet_format_path"] = sheet_format
+    return payload
+
+
+@tool("list_sheets", "Read-only: list the sheets of the active drawing, with the active one marked.", {})
+def list_sheets(args: dict[str, Any]) -> dict[str, Any]:
+    _, doc = require_drawing()
+    payload = _sheet_readback(doc)
+    return result(True, f"Read {len(payload['sheets'])} sheets.", **payload)
 
 
 @tool(
@@ -1096,3 +1115,4 @@ def add_note(args: dict[str, Any]) -> dict[str, Any]:
     rebuild(doc)
     clear_selection(doc)
     return result(True, "Added a note.", text=str(args["text"]))
+
